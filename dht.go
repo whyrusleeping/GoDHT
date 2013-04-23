@@ -34,6 +34,18 @@ func NewDHT(size int) *DHT {
 	return &DHT{make([]entry, size), make([]string, 128)}
 }
 
+//attempts to get a lock on the given key string across the network, returns success
+func (d *DHT) GetLock(onkey string) bool {
+	//Send request for lock to each node that this node is connected to
+	//On each of those nodes, if the lock is available, take it, set the lockID to this nodes ID
+	//send out lock requests to each node that they are connected to
+	//If a node receives a lock request and the lock is already taken:
+	//	check if the lock ID is this requesting node, if it is, return YES
+	//	Otherwise, [resolve locking conflict]
+	//Once all nodes return YES, return YES
+	//If the nodes dont return YES in a certain time, return NO
+}
+
 func (d *DHT) GetVal(key string) string {
 	n := d.h.hash(key, 0)
 	for i := 1; d.arr[n].k != key && i < 256; i++ {
