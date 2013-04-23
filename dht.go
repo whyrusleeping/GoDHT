@@ -11,6 +11,7 @@ type entry struct {
 type DHT struct { 
 	arr []entry
 	peers []string
+	peerCons []net.Conn
 	h Hash
 }
 
@@ -49,6 +50,15 @@ func (d *DHT) GetVal(key string) string {
 	return d.arr[n].v
 }
 
+func (d *DHT) SetValue(key, val string) {
+	//First, request a lock on this entry across the network
+	//Set the value across the network
+	//And then release the lock
+}
+
 func (d *DHT) ConnectToPeer(addr string) {
-	
+	//Make connection to node at given address
+	//Merge entries in local hash tables
+	//In the event of collisions between the hash tables, 
+	//	do a standard collision procedure and propogate the changes to both networks
 }
