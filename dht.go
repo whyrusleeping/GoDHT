@@ -3,29 +3,31 @@ package main
 import (
   "net"
 )
-type entry struct {
-	k, v string
-	lock bool
-}
-
-type DHT struct { 
-	arr []entry
-	peers []string
-	peerCons []net.Conn
-	h Hash
-}
 
 type Hash interface {
 	func hash(s string) int
 }
 
 type LameHash struct {}
-func (L LameHash) hash(s string, m int) int64 {
+func (L LameHash) hash(s string, m, size int) int64 {
 	i := int64(0)
 	for n, c := range s {
-		i += (n * c + m)**2
+		i = (i + (n * c + m)**2) % size
 	}
 	return i
+}
+
+type entry struct {
+	k, v string
+	lock bool
+}
+
+type DHT struct { 
+	ID string //Some value universally unique to this exact object (hash of IP, MAC, program execution time?)
+	arr []entry
+	peers []string
+	peerCons []net.Conn
+	h Hash
 }
 
 func NewDHT(size int) *DHT {
