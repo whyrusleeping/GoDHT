@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/binary"
+	"math/rand"
 )
 
 const (
-	MLockReq = byte(iota)
+	MUnknown = byte(iota)
+	MLockReq
 	MLockRespYes
 	MLockRespNo
 	MUpdateVal
@@ -13,6 +15,14 @@ const (
 	MRemindVal
 	MRemindReq
 )
+
+type Message struct {
+	ID []byte
+	Type byte
+	Key uint64
+	Val string
+	Timestamp int64
+}
 
 func MakeLockRequest(ID []byte, key uint64, ts uint64) []byte {
 	arr := make([]byte, 25 + len(ID))
@@ -52,7 +62,7 @@ func MakeUpdateRequest(ID []byte, key uint64, val string) []byte {
 
 func MakeLockReleaseRequest(ID []byte, key uint64, ts uint64) []byte {
 	arr := make([]byte, 25 + len(ID))
-	arr[0] = MLockReq
+	arr[0] = MLockRelease
 	binary.PutUvarint(arr[1:], key)
 	binary.PutUvarint(arr[9:], ts)
 	binary.PutUvarint(arr[17:], uint64(len(ID)))
@@ -74,4 +84,8 @@ func MakeReminderRequest(key uint64) []byte {
 	arr[0] = MRemindReq
 	binary.PutUvarint(arr[1:], key)
 	return arr
+}
+
+func Rand(n int64) uint64 {
+	return uint64(rand.Int63n(n))
 }

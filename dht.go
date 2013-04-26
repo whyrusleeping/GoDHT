@@ -2,18 +2,21 @@ package main
 
 import (
 	"net"
-	"encoding/binary"
+	"encoding/base64"
 	"crypto/sha1"
 	"os"
 	"crypto/rand"
 	"fmt"
+	"encoding/gob"
 	"time"
+	"bytes"
+	//"strconv"
 )
 
 
 type LockInfo struct {
 	Holder string
-	time uint64
+	time int64
 }
 
 type entry struct {
@@ -44,52 +47,94 @@ func GetUID() []byte {
 	return ID
 }
 
-func NewDHT(size int) *DHT {
+func NewDHT(size int, port string) *DHT {
 	dht := new(DHT)
 	dht.ID = GetUID()
 	dht.arr = make([]*entry, size)
 	dht.peerCons = make([]net.Conn, 128)
-	go dht.Listen()
+	dht.lockReqs = make(map[uint64]chan bool)
+	go dht.Listen(port)
 	return dht
 }
 
 func (d *DHT) HandleConnection(c net.Conn) {
-	flagByte := []byte{0}
+	d.peerCons[d.numCons] = c
+	d.numCons++
+	income := gob.NewDecoder(c)
+	var mes Message
 	for {
-		c.Read(flagByte)
-		switch flagByte[0] {
-			case MLockReq:
-				buffer := make([]byte, 8)
-				c.Read(buffer)
-				key, _ := binary.Uvarint(buffer)
-				c.Read(buffer)
-				timestamp, _ := binary.Uvarint(buffer)
-				c.Read(buffer)
-				idlen, _ := binary.Uvarint(buffer)
-				id := make([]byte, idlen)
-				c.Read(id)
-				go d.DoLockRequest(c, string(id), key, timestamp)
-			case MLockRelease:
-			case MLockRespYes, MLockRespNo:
-				buffer := make([]byte, 8)
-				c.Read(buffer)
-				key, _ := binary.Uvarint(buffer)
-				c.Read(buffer)
-				ts, _  := binary.Uvarint(buffer)
-				c.Read(buffer)
-				idl, _ := binary.Uvarint(buffer)
-				id := make([]byte, idl)
-				c.Read(id)
-				go d.DoLockResponse(key, ts, id, flagByte[0])
-
-			case MUpdateVal:
-			case MRemindVal:
+		income.Decode(&mes)
+		switch mes.Type {
+		case MLockReq:
+			d.DoLockRequest(c, &mes)
+		case MLockRelease:
+			d.DoLockRelease(&mes)
+		case MLockRespYes, MLockRespNo:
+			d.DoLockResponse(&mes)
+		case MUpdateVal:
+			d.DoValueUpdate(&mes)
+		case MRemindVal:
+			d.DoRemind(&mes)
+		case MRemindReq:
+			d.DoReminder(c, &mes)
+		default:
+			d.Log("Received invalid message type")
 		}
 	}
 }
 
-func (d *DHT) Listen() {
-	addr, err := net.ResolveTCPAddr("tcp",":8282")
+func (d *DHT) DoLockRelease(mes *Message) {
+	d.Log(fmt.Sprintf("Releasing key %d", mes.Key))
+	if d.arr[mes.Key] == nil {
+		panic("WHAT DO?")
+	}
+
+	e := d.arr[mes.Key]
+	if e.lock != nil {
+
+	}
+}
+
+//Accept 'reminder' which updates an entry only if that entry is null (never been set)
+func (d *DHT) DoRemind(mes *Message) {
+	if d.arr[mes.Key] == nil {
+		m := new(entry)
+		m.val = mes.Val
+		d.arr[mes.Key] = m
+	}
+}
+
+func (d *DHT) DoValueUpdate(mes *Message) {
+	d.Log("In DoValueUpdate.")
+	if d.arr[mes.Key] == nil {
+		d.arr[mes.Key] = new(entry)
+	}
+
+	e := d.arr[mes.Key]
+	if e.val != mes.Val {
+		d.sendToAll(mes)
+		e.val = mes.Val
+	}
+}
+
+func (d *DHT) DoReminder(c net.Conn, mes *Message) {
+	d.Log("In DoReminder")
+	if d.arr[mes.Key] == nil {
+		if d.remReqs[mes.Key] == nil {
+			//Propogate request
+		}
+	} else {
+		var nmes Message
+		nmes.Key = mes.Key
+		nmes.Val = d.arr[mes.Key].val
+		nmes.Type = MRemindVal
+		enc := gob.NewEncoder(c)
+		enc.Encode(&nmes)
+	}
+}
+
+func (d *DHT) Listen(port string) {
+	addr, err := net.ResolveTCPAddr("tcp",port)
 	if err != nil {
 		panic(err)
 	}
@@ -105,26 +150,47 @@ func (d *DHT) Listen() {
 	}
 }
 
+func (d *DHT) Log(message string) {
+	fmt.Printf("%s: %s\n", d.PrintUID(), message)
+}
 
-func (d *DHT) DoLockResponse(key, ts uint64, id []byte, sig byte) {
-	if string(id) == string(d.ID) {
-
+func (d *DHT) DoLockResponse(mes *Message) {
+	d.Log(fmt.Sprintf("Got lock response of %d for key %d", mes.Type, mes.Key))
+	if string(mes.ID) == string(d.ID) {
+		d.lockReqs[mes.Key] <- (mes.Type == MLockRespYes)
+	} else {
+		d.Log("ID's did not match")
+		//Propogate outwards?
 	}
 }
 
-func (d *DHT) DoLockRequest(c net.Conn, id string, key uint64, ts uint64) {
-	if d.arr[key] == nil {
-		d.arr[key] = new(entry)
+func (d *DHT) DoLockRequest(c net.Conn, mes *Message) {
+	d.Log(fmt.Sprintf("In DoLockRequest for key %d", mes.Key))
+	if d.arr[mes.Key] == nil {
+		d.arr[mes.Key] = new(entry)
 	}
-	e := d.arr[key]
+	e := d.arr[mes.Key]
 	if e.lock == nil {
 		e.lock = new(LockInfo)
-		e.lock.Holder = id
-		e.lock.time = ts
+		e.lock.Holder = string(mes.ID)
+		e.lock.time = mes.Timestamp
 		//Now propogate out this message to each other node
+		if d.numCons == 1 {
+			d.Log("Returning true to lock request.")
+			enc := gob.NewEncoder(c)
+			mes.Type = MLockRespYes
+			enc.Encode(mes)
+		} else {
+			mes.Type = MLockReq
+			d.sendToAll(mes)
+		}
 	} else {
-		if e.lock.Holder == id {
+		if e.lock.Holder == string(mes.ID) {
 			//Write back YES to say that the lock it held
+			d.Log("Returning true to lock request.")
+			enc := gob.NewEncoder(c)
+			mes.Type = MLockRespYes
+			enc.Encode(mes)
 		} else {
 			//Lock contention, resolve please
 		}
@@ -133,6 +199,7 @@ func (d *DHT) DoLockRequest(c net.Conn, id string, key uint64, ts uint64) {
 
 //attempts to get a lock on the given key string across the network, returns success
 func (d *DHT) tryGetLock(onkey uint64) bool {
+	d.Log(fmt.Sprintf("Attempting to lock key %d", onkey))
 	//Send request for lock to each node that this node is connected to
 
 	//Claim lock locally
@@ -140,7 +207,7 @@ func (d *DHT) tryGetLock(onkey uint64) bool {
 		d.arr[onkey] = new(entry)
 	}
 
-	utime := uint64(time.Now().UnixNano())
+	utime := time.Now().UnixNano()
 	temp := d.arr[onkey]
 	if temp.lock != nil {
 		return false
@@ -150,12 +217,12 @@ func (d *DHT) tryGetLock(onkey uint64) bool {
 		temp.lock.time = utime
 	}
 
-	lreq := MakeLockRequest(d.ID, onkey, utime)
-	nreq := 0
-	for _, c := range d.peerCons {
-		c.Write(lreq)
-		nreq++
-	}
+	//lreq := MakeLockRequest(d.ID, onkey, utime)
+	mes := new(Message)
+	mes.Type = MLockReq
+	mes.Key = onkey
+	mes.ID = d.ID
+	n := d.sendToAll(mes)
 	d.lockReqs[onkey] = make(chan bool)
 	//On each of those nodes, if the lock is available, take it, set the lockID to this nodes ID
 	//send out lock requests to each node that they are connected to
@@ -163,20 +230,23 @@ func (d *DHT) tryGetLock(onkey uint64) bool {
 	//	check if the lock ID is this requesting node, if it is, return YES
 	//	Otherwise, [resolve locking conflict]
 	//Once all nodes return YES, return YES
-	for ;nreq > 0; nreq-- {
+	d.Log(fmt.Sprintf("Waiting on %d nodes", n))
+	for ;n > 0; n-- {
 		v := <-d.lockReqs[onkey]
+		d.Log("Got lock return from channel")
 		if !v {
-			return false
 			temp.lock = nil
+			d.Log("Failed to get lock!")
+			return false
 		}
 	}
+	d.Log(fmt.Sprintf("Got lock for key %d", onkey))
+	d.lockReqs[onkey] = nil
 	//If the nodes dont return YES in a certain time, return NO
 	return true
 }
 
 func (d *DHT) releaseLock(onkey uint64) {
-	lrel := MakeLockReleaseRequest(d.ID, onkey, uint64(time.Now().UnixNano()))
-
 	if d.arr[onkey] == nil {
 		d.arr[onkey] = new(entry)
 	}
@@ -193,25 +263,36 @@ func (d *DHT) releaseLock(onkey uint64) {
 	}
 
 	//Now propogate the release outwards
-	d.sendToAll(lrel)
+	mes := new(Message)
+	mes.Type = MLockRelease
+	mes.ID = d.ID
+	mes.Key = onkey
+	mes.Timestamp = time.Now().UnixNano()
+	d.sendToAll(mes)
 	//exit because we dont care about the release 'finishing'
 }
 
-func (d *DHT) sendToAll(b []byte) int {
-	n := 0
-	for _, c := range d.peerCons {
-		c.Write(b)
-		n++
+func (d *DHT) sendToAll(mes *Message) int {
+	buf := new(bytes.Buffer)
+	genc := gob.NewEncoder(buf)
+	genc.Encode(mes)
+	b := buf.Bytes()
+	for i := 0; i < d.numCons; i++ {
+		d.peerCons[i].Write(b)
 	}
-	return n
+	return d.numCons
 }
 
-func (d *DHT) GetVal(key int) string {
+func (d *DHT) GetVal(key uint64) string {
 	//Wait for any locks on this entry to resolve
 	if d.arr[key] == nil {
 		//SEND OUT REMINDER REQUEST
 		d.remReqs[key] = make(chan string)
-		d.sendToAll(MakeReminderRequest(key))
+		var mes Message
+		mes.ID = d.ID
+		mes.Type = MRemindReq
+		mes.Key = key
+		d.sendToAll(&mes)
 		val := <-d.remReqs[key]
 		d.remReqs[key] = nil
 		d.arr[key] = new(entry)
@@ -226,13 +307,24 @@ func (d *DHT) GetVal(key int) string {
 }
 
 func (d *DHT) SetValue(key uint64, val string) {
+	d.Log(fmt.Sprintf("Setting value for key %d.", key))
 	//First, request a lock on this entry across the network
 	if d.tryGetLock(key) {
+		d.Log("Got Lock!")
 		//Set the value across the network
-		d.sendToAll(MakeUpdateRequest(d.ID, key, val))
+		var mes Message
+		mes.ID = d.ID
+		mes.Type = MUpdateVal
+		mes.Key = key
+		mes.Val = val
+		d.sendToAll(&mes)
 		//And then release the lock
 		d.releaseLock(key)
 	}
+}
+
+func (d *DHT) PrintUID() string {
+	return base64.StdEncoding.EncodeToString(d.ID)
 }
 
 func (d *DHT) connectToPeer(addr string) {
@@ -240,17 +332,33 @@ func (d *DHT) connectToPeer(addr string) {
 	c, err := net.DialTCP("tcp", nil, nAddr)
 	if err != nil {
 		fmt.Printf("Failed to connect to %s.\n", addr)
+		fmt.Println(err)
 		return
 	}
-	d.peerCons[d.numCons] = c
-	d.numCons++
 	//Do initial handshake
 	//request hash table entries
 
+	go d.HandleConnection(c)
 }
 
 func main() {
-	d := NewDHT(1024)
-	d.GetVal(0)
+	sn := 32
+	d := NewDHT(sn, os.Args[1])
+	fmt.Printf("First ID: %s\n",d.PrintUID())
+	da := NewDHT(sn, ":8080")
+	fmt.Printf("Second ID: %s\n",da.PrintUID())
+
+	time.Sleep(time.Second)
+	d.connectToPeer("127.0.0.1:8080")
+	/*
+	for {
+		i := Rand(int64(sn))
+		time.Sleep(time.Second)
+		d.SetValue(i, strconv.Itoa(int(i)))
+	}
+	*/
+	time.Sleep(time.Second)
+	d.SetValue(3, "THEFISH")
+	fmt.Println(da.arr[3].val)
 	//fmt.Println(m)
 }
