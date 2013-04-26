@@ -51,19 +51,22 @@ func NewDHT(size int, port string) *DHT {
 	dht := new(DHT)
 	dht.ID = GetUID()
 	dht.arr = make([]*entry, size)
-	dht.peerCons = make([]net.Conn, 128)
+	dht.peerCons = make([]net.Conn,0,  128)
 	dht.lockReqs = make(map[uint64]chan bool)
 	go dht.Listen(port)
 	return dht
 }
 
 func (d *DHT) HandleConnection(c net.Conn) {
+	d.peerCons = d.peerCons[:len(d.peerCons)+1]
 	d.peerCons[d.numCons] = c
 	d.numCons++
 	income := gob.NewDecoder(c)
 	var mes Message
 	for {
+		d.Log("Waiting for message...")
 		income.Decode(&mes)
+		d.Log(fmt.Sprintf("Got message of type %d",mes.Type))
 		switch mes.Type {
 		case MLockReq:
 			d.DoLockRequest(c, &mes)
@@ -277,10 +280,16 @@ func (d *DHT) sendToAll(mes *Message) int {
 	genc := gob.NewEncoder(buf)
 	genc.Encode(mes)
 	b := buf.Bytes()
-	for i := 0; i < d.numCons; i++ {
-		d.peerCons[i].Write(b)
+	for i := 0; i < len(d.peerCons); i++ {
+		n, err := d.peerCons[i].Write(b)
+		if n == 0 {
+			d.Log("Wrote zero bytes.")
+		}
+		if err != nil {
+			d.Log(err.Error())
+		}
 	}
-	return d.numCons
+	return len(d.peerCons)
 }
 
 func (d *DHT) GetVal(key uint64) string {
@@ -347,9 +356,11 @@ func main() {
 	fmt.Printf("First ID: %s\n",d.PrintUID())
 	da := NewDHT(sn, ":8080")
 	fmt.Printf("Second ID: %s\n",da.PrintUID())
+	db := NewDHT(sn, ":8181")
 
 	time.Sleep(time.Second)
 	d.connectToPeer("127.0.0.1:8080")
+	db.connectToPeer("127.0.0.1:8080")
 	/*
 	for {
 		i := Rand(int64(sn))
@@ -359,6 +370,8 @@ func main() {
 	*/
 	time.Sleep(time.Second)
 	d.SetValue(3, "THEFISH")
+	time.Sleep(time.Second * 3)
+	fmt.Println(da.arr[3].val)
 	fmt.Println(da.arr[3].val)
 	//fmt.Println(m)
 }
